@@ -1,4 +1,4 @@
-name: Build and Deploy to DigitalOcean (rsync, no external ssh action)
+name: Build and Debug Deploy to DigitalOcean (rsync debug)
 
 on:
   push:
@@ -14,12 +14,11 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Use Node.js ${{ env.NODE_VERSION }}
+      - name: Use Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -31,41 +30,42 @@ jobs:
       - name: Build (Vite)
         run: npm run build
 
-      - name: Ensure rsync & openssh-client are installed
+      - name: Install helpers
         run: sudo apt-get update && sudo apt-get install -y rsync openssh-client
 
-      - name: Configure SSH agent and add key (from DO_SSH_KEY secret)
-        # This step writes the private key from secrets to a file, starts ssh-agent, and adds the key.
-        # It also makes the key file unreadable by others.
+      - name: Configure SSH agent and add key (debug)
         run: |
-          set -e
-          # Write the private key to a file (strip CR if present)
-          echo "${{ secrets.DO_SSH_KEY }}" | sed 's/\r$//' > /tmp/deploy_key
+          set -xe
+          # write private key to a temp file
+          printf '%s\n' "${{ secrets.DO_SSH_KEY }}" | sed 's/\r$//' > /tmp/deploy_key
           chmod 600 /tmp/deploy_key
-
-          # Start ssh-agent and add the key
+          echo "Key file created: /tmp/deploy_key (size: $(stat -c%s /tmp/deploy_key) bytes)"
+          # start ssh-agent & add key
           eval "$(ssh-agent -s)"
-          ssh-add /tmp/deploy_key
+          ssh-add /tmp/deploy_key || true
+          echo "List ssh-agent identities:"
+          ssh-add -l || true
+          # optionally show known_hosts lines when present (not printing secret)
+          ls -la ~/.ssh || true
 
-          # Optionally add the host to known_hosts to avoid strict host checking prompt.
-          # Uncomment the next two lines if you prefer to use known_hosts rather than StrictHostKeyChecking=no
-          # mkdir -p ~/.ssh
-          # ssh-keyscan -H ${{ env.DO_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Create remote directory (if missing) and set perms
+      - name: Quick SSH connectivity test (verbose)
         run: |
+          set -xe
           SSH_PORT=${{ secrets.DO_PORT || '22' }}
-          ssh -o StrictHostKeyChecking=no -p $SSH_PORT ${{ env.DO_USER }}@${{ env.DO_HOST }} "mkdir -p '${{ env.DO_REMOTE_PATH }}' && chmod 0755 '${{ env.DO_REMOTE_PATH }}'"
+          echo "Testing SSH connection to ${{ env.DO_USER }}@${{ env.DO_HOST }}:$SSH_PORT"
+          # BatchMode avoids password prompts and causes fast failure on auth errors
+          ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -p $SSH_PORT ${{ env.DO_USER }}@${{ env.DO_HOST }} 'echo SSH_OK' 
 
-      - name: Deploy dist/ to DigitalOcean (rsync)
+      - name: Rsync dry-run (diagnostic)
         run: |
+          set -xe
+          SSH_PORT=${{ secrets.DO_PORT || '22' }}
+          echo "Running rsync dry-run (no changes) to show connectivity/auth"
+          rsync -avz -n --delete -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=no -o BatchMode=yes" ./dist/ ${{ env.DO_USER }}@${{ env.DO_HOST }}:${{ env.DO_REMOTE_PATH }}
+
+      - name: (Actual Deploy) Deploy dist/ to DigitalOcean (uncomment when debugged)
+        if: false
+        run: |
+          set -xe
           SSH_PORT=${{ secrets.DO_PORT || '22' }}
           rsync -avz --delete -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=no" ./dist/ ${{ env.DO_USER }}@${{ env.DO_HOST }}:${{ env.DO_REMOTE_PATH }}
-
-      - name: (Optional) Reload nginx on remote (uncomment if needed)
-        if: always()
-        run: |
-          SSH_PORT=${{ secrets.DO_PORT || '22' }}
-          # Uncomment to reload nginx if deployer has sudo rights
-          # ssh -o StrictHostKeyChecking=no -p $SSH_PORT ${{ env.DO_USER }}@${{ env.DO_HOST }} "sudo systemctl reload nginx || true"
-          echo "Deployed to ${{ env.DO_HOST }}:${{ env.DO_REMOTE_PATH }}"
