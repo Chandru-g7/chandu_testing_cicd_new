@@ -1,4 +1,4 @@
-name: Build and Deploy to DigitalOcean (rsync)
+name: Build and Deploy to DigitalOcean (rsync, no external ssh action)
 
 on:
   push:
@@ -6,11 +6,10 @@ on:
       - main
 
 env:
-  # You provided these values — they are hardcoded here for convenience.
   DO_HOST: 139.59.30.89
   DO_USER: deployer
   DO_REMOTE_PATH: /var/www/upskill.gyannidhi.in/demo1
-  NODE_VERSION: '20'   # change if you need a different node version
+  NODE_VERSION: '20'
 
 jobs:
   build-and-deploy:
@@ -32,13 +31,26 @@ jobs:
       - name: Build (Vite)
         run: npm run build
 
-      - name: Ensure rsync is installed
-        run: sudo apt-get update && sudo apt-get install -y rsync
+      - name: Ensure rsync & openssh-client are installed
+        run: sudo apt-get update && sudo apt-get install -y rsync openssh-client
 
-      - name: Start ssh-agent and add private key (from secret DO_SSH_KEY)
-        uses: webfactory/ssh-agent@v0.8.1
-        with:
-          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+      - name: Configure SSH agent and add key (from DO_SSH_KEY secret)
+        # This step writes the private key from secrets to a file, starts ssh-agent, and adds the key.
+        # It also makes the key file unreadable by others.
+        run: |
+          set -e
+          # Write the private key to a file (strip CR if present)
+          echo "${{ secrets.DO_SSH_KEY }}" | sed 's/\r$//' > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          # Start ssh-agent and add the key
+          eval "$(ssh-agent -s)"
+          ssh-add /tmp/deploy_key
+
+          # Optionally add the host to known_hosts to avoid strict host checking prompt.
+          # Uncomment the next two lines if you prefer to use known_hosts rather than StrictHostKeyChecking=no
+          # mkdir -p ~/.ssh
+          # ssh-keyscan -H ${{ env.DO_HOST }} >> ~/.ssh/known_hosts
 
       - name: Create remote directory (if missing) and set perms
         run: |
@@ -48,13 +60,12 @@ jobs:
       - name: Deploy dist/ to DigitalOcean (rsync)
         run: |
           SSH_PORT=${{ secrets.DO_PORT || '22' }}
-          # Sync contents of ./dist/ into remote path (deletes removed files)
           rsync -avz --delete -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=no" ./dist/ ${{ env.DO_USER }}@${{ env.DO_HOST }}:${{ env.DO_REMOTE_PATH }}
 
       - name: (Optional) Reload nginx on remote (uncomment if needed)
         if: always()
         run: |
           SSH_PORT=${{ secrets.DO_PORT || '22' }}
-          # Uncomment the next line if the deploy user has sudo rights and you want nginx reloaded
+          # Uncomment to reload nginx if deployer has sudo rights
           # ssh -o StrictHostKeyChecking=no -p $SSH_PORT ${{ env.DO_USER }}@${{ env.DO_HOST }} "sudo systemctl reload nginx || true"
           echo "Deployed to ${{ env.DO_HOST }}:${{ env.DO_REMOTE_PATH }}"
